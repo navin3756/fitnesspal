@@ -1,14 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 // Main App Component
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Ruler, Utensils, Clock, Moon, Brain, 
+import {
+  Ruler, Utensils, Clock, Moon, Brain,
   Droplet, Scale, Dumbbell, Calendar as CalendarIcon, Users,
   Trophy, Flame, CheckCircle2, Circle,
   ChevronDown, ChevronUp, Target, ListChecks, Medal,
-  MessageSquare, HeartPulse, MessageCircle, Bell, Send, AlertCircle
+  MessageSquare, HeartPulse, MessageCircle, Bell, Send, TrendingDown
 } from 'lucide-react';
-import { GoogleGenAI } from "@google/genai";
 import Markdown from 'react-markdown';
 
 const COMMANDMENTS = [
@@ -195,6 +194,7 @@ export default function App() {
   const [realityStats, setRealityStats] = useState({
     weight: "", waist: "", bp_sys: "", bp_dia: "", glucose: ""
   });
+  const [realityHistory, setRealityHistory] = useState<any[]>([]);
 
   // Community Fails State
   const [fails, setFails] = useState<any[]>([]);
@@ -230,6 +230,7 @@ export default function App() {
       });
       fetchHistory(parsed.id);
       fetchNudges(parsed.id);
+      fetchRealityHistory(parsed.id);
       requestNotificationPermission();
     }
   }, []);
@@ -313,33 +314,41 @@ export default function App() {
       const updatedUser = { ...user, ...realityStats, last_reality_check: todayStr };
       setUser(updatedUser);
       localStorage.setItem('drpal_user', JSON.stringify(updatedUser));
+      fetchRealityHistory(user.id);
       alert("Reality Check saved! Numbers don't lie! 🩺");
     } catch (err) {
       console.error(err);
     }
   };
 
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages, isChatLoading]);
+
   const handleChat = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!chatInput.trim() || isChatLoading) return;
 
-    const userMsg = chatInput;
+    const userMsg = chatInput.trim();
     setChatInput("");
-    setChatMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    const updatedMessages = [...chatMessages, { role: 'user' as const, text: userMsg }];
+    setChatMessages(updatedMessages);
     setIsChatLoading(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: [
-          { role: 'user', parts: [{ text: `You are Dr. Pal, a funny, direct, and health-conscious Indian doctor. You believe in the 10 Commandments of health (waist < 90/80cm, 7-7 eating, sleep, meditation, water, portion control, exercise, accountability). Use humor, light sarcasm, and medical wisdom. Keep responses concise and encouraging but firm. User says: ${userMsg}` }] }
-        ],
+      const res = await fetch(`${API_BASE}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: updatedMessages }),
       });
-      setChatMessages(prev => [...prev, { role: 'model', text: response.text || "My gut feeling is confused. Try again!" }]);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Unknown error');
+      setChatMessages(prev => [...prev, { role: 'model', text: data.text }]);
     } catch (err) {
       console.error(err);
-      setChatMessages(prev => [...prev, { role: 'model', text: "Even my medical degree can't fix this connection error. Try again!" }]);
+      setChatMessages(prev => [...prev, { role: 'model', text: "Even my medical degree can't fix this connection error. Try again! 😅" }]);
     } finally {
       setIsChatLoading(false);
     }
@@ -397,6 +406,16 @@ export default function App() {
       const res = await fetch(`${API_BASE}/api/leaderboard`);
       const data = await res.json();
       setLeaderboard(data);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchRealityHistory = async (userId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/reality-history/${userId}`);
+      const data = await res.json();
+      setRealityHistory(data);
     } catch (err) {
       console.error(err);
     }
@@ -1019,6 +1038,7 @@ export default function App() {
                         </div>
                       </div>
                     )}
+                    <div ref={chatEndRef} />
                   </div>
                   <form onSubmit={handleChat} className="p-4 border-t border-slate-100 bg-slate-50 flex gap-2">
                     <input 
@@ -1110,6 +1130,57 @@ export default function App() {
                     )}
                   </div>
                 </form>
+
+                {realityHistory.length > 1 && (
+                  <div className="mt-8">
+                    <div className="flex items-center gap-2 mb-4">
+                      <TrendingDown size={18} className="text-amber-600" />
+                      <h3 className="font-bold text-slate-800">Progress Over Time</h3>
+                    </div>
+                    <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+                      <div className="grid grid-cols-6 gap-0 text-xs font-bold text-slate-500 uppercase px-4 py-3 border-b border-slate-100 bg-slate-50">
+                        <div className="col-span-2">Date</div>
+                        <div className="text-center">Weight</div>
+                        <div className="text-center">Waist</div>
+                        <div className="text-center">BP</div>
+                        <div className="text-center">Glucose</div>
+                      </div>
+                      {realityHistory.map((check, idx) => {
+                        const next = realityHistory[idx + 1];
+                        const weightDiff = next && check.weight && next.weight ? (check.weight - next.weight) : null;
+                        const waistDiff = next && check.waist && next.waist ? (check.waist - next.waist) : null;
+                        return (
+                          <div key={check.id} className={`grid grid-cols-6 gap-0 px-4 py-3 border-b border-slate-50 last:border-0 text-sm ${idx === 0 ? 'bg-amber-50/60' : ''}`}>
+                            <div className="col-span-2 font-medium text-slate-700">
+                              {new Date(check.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })}
+                              {idx === 0 && <span className="ml-1 text-[10px] bg-amber-200 text-amber-800 px-1 rounded">Latest</span>}
+                            </div>
+                            <div className="text-center text-slate-700">
+                              {check.weight ?? '—'}
+                              {weightDiff !== null && (
+                                <span className={`ml-1 text-[10px] font-bold ${weightDiff < 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                                  {weightDiff < 0 ? '▼' : '▲'}{Math.abs(weightDiff).toFixed(1)}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-center text-slate-700">
+                              {check.waist ?? '—'}
+                              {waistDiff !== null && (
+                                <span className={`ml-1 text-[10px] font-bold ${waistDiff < 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
+                                  {waistDiff < 0 ? '▼' : '▲'}{Math.abs(waistDiff).toFixed(1)}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-center text-slate-700">
+                              {check.bp_sys && check.bp_dia ? `${check.bp_sys}/${check.bp_dia}` : '—'}
+                            </div>
+                            <div className="text-center text-slate-700">{check.glucose ?? '—'}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </motion.div>
             )}
 

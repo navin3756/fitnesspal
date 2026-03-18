@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import cors from "cors";
+import { GoogleGenAI } from "@google/genai";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -56,6 +57,20 @@ db.exec(`
     content TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS reality_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    date TEXT,
+    weight REAL,
+    waist REAL,
+    bp_sys INTEGER,
+    bp_dia INTEGER,
+    glucose INTEGER,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, date)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reality_user ON reality_checks(user_id, date DESC);
 `);
 
 // Migration for existing users table
@@ -192,10 +207,18 @@ async function startServer() {
   app.post("/api/reality-check", (req, res) => {
     const { userId, weight, waist, bp_sys, bp_dia, glucose, date } = req.body;
     db.prepare(`
-      UPDATE users 
-      SET weight = ?, waist = ?, bp_sys = ?, bp_dia = ?, glucose = ?, last_reality_check = ? 
+      UPDATE users
+      SET weight = ?, waist = ?, bp_sys = ?, bp_dia = ?, glucose = ?, last_reality_check = ?
       WHERE id = ?
     `).run(weight, waist, bp_sys, bp_dia, glucose, date, userId);
+    // Also persist to history table
+    db.prepare(`
+      INSERT INTO reality_checks (user_id, date, weight, waist, bp_sys, bp_dia, glucose)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, date) DO UPDATE SET
+        weight = excluded.weight, waist = excluded.waist,
+        bp_sys = excluded.bp_sys, bp_dia = excluded.bp_dia, glucose = excluded.glucose
+    `).run(userId, date, weight, waist, bp_sys, bp_dia, glucose);
     res.json({ success: true });
   });
 
@@ -231,6 +254,45 @@ async function startServer() {
     const { userId, userName, content } = req.body;
     db.prepare("INSERT INTO community_fails (user_id, user_name, content) VALUES (?, ?, ?)").run(userId, userName, content);
     res.json({ success: true });
+  });
+
+  // AI Chat endpoint (proxies to Gemini, keeps API key server-side)
+  app.post("/api/chat", async (req, res) => {
+    const { messages } = req.body;
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "messages array required" });
+    }
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(503).json({ error: "AI service not configured" });
+    }
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const systemInstruction = `You are Dr. Pal, a funny, direct, and health-conscious doctor specializing in metabolic health. You believe in these 10 Commandments: 1) Waist < 90cm (men) / 80cm (women), 2) Diet quality > exercise (80/20 rule), 3) Time-restricted eating 7AM–7PM, 4) Sleep ≥7h (men) / 8h (women), 5) Meditate ≥7 min daily, 6) Drink ≥2L water daily, 7) Limit cooked rice to ~150g per meal, 8) Exercise ≥20 min at 60-70% max HR, 9) 90-day health reassessment, 10) Stay healthy for your dependents. Use warm humor, light sarcasm, and solid medical reasoning. Keep answers concise and encouraging but firm. Format responses with markdown when helpful.`;
+
+      const contents = messages.map((msg: { role: string; text: string }) => ({
+        role: msg.role === "user" ? "user" : "model",
+        parts: [{ text: msg.text }],
+      }));
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents,
+        config: { systemInstruction },
+      });
+
+      res.json({ text: response.text ?? "No response generated." });
+    } catch (err) {
+      console.error("Chat error:", err);
+      res.status(500).json({ error: "AI response failed" });
+    }
+  });
+
+  // Reality Check history
+  app.get("/api/reality-history/:userId", (req, res) => {
+    const checks = db.prepare(
+      "SELECT * FROM reality_checks WHERE user_id = ? ORDER BY date DESC LIMIT 10"
+    ).all(req.params.userId);
+    res.json(checks);
   });
 
   // Vite middleware for development
